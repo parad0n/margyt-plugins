@@ -184,4 +184,4 @@ jobs:
       - name: Release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "build-${{ github.run_number }}" margyt.badge.mtp --title "Badge build ${{ github.run_number }}" --notes "margyt.badge.mtp"
+        run: gh release create "build-${{ github.run_number }}" --repo ${{ github.repository }} margyt.badge.mtp --title "Badge build ${{ github.run_number }}" --notes "margyt.badge.mtp"
