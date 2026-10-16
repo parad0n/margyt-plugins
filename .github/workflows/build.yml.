@@ -1,0 +1,187 @@
+name: build
+on:
+  push:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Write sources
+        run: |
+          mkdir -p src/cat/narezany/margyt/plugin src/cat/you/badge out
+          cat > src/cat/narezany/margyt/plugin/PluginContext.java <<'EOF'
+          package cat.narezany.margyt.plugin;
+          import android.app.Activity;
+          import android.content.SharedPreferences;
+          public class PluginContext {
+              public SharedPreferences prefs() { return null; }
+              public void addSettingsRow(String t, String s, Runnable r) {}
+              public void onUiThread(Runnable r) {}
+              public Activity activity() { return null; }
+          }
+          EOF
+          cat > src/cat/narezany/margyt/plugin/MargyPlugin.java <<'EOF'
+          package cat.narezany.margyt.plugin;
+          import android.app.Activity;
+          import android.content.Context;
+          public abstract class MargyPlugin {
+              public final PluginContext margyt() { return null; }
+              public void onStart(Context c) {}
+              public void onActivityResumed(Activity a) {}
+              public CharSequence onText(CharSequence t) { return t; }
+          }
+          EOF
+          cat > src/cat/you/badge/Badge.java <<'EOF'
+          package cat.you.badge;
+
+          import android.app.Activity;
+          import android.app.AlertDialog;
+          import android.content.Context;
+          import android.graphics.*;
+          import android.graphics.drawable.BitmapDrawable;
+          import android.text.*;
+          import android.text.style.ImageSpan;
+          import android.view.*;
+          import android.widget.*;
+          import cat.narezany.margyt.plugin.MargyPlugin;
+
+          public final class Badge extends MargyPlugin {
+              static final class Tick extends ImageSpan {
+                  Tick(BitmapDrawable d) { super(d, ImageSpan.ALIGN_BASELINE); }
+              }
+
+              private volatile String target = "";
+              private BitmapDrawable icon;
+              private long lastScan;
+
+              @Override public void onStart(Context c) {
+                  target = margyt().prefs().getString("name", "").trim();
+                  float d = c.getResources().getDisplayMetrics().density;
+                  int px = (int) (15 * d), big = 64;
+                  Bitmap b = Bitmap.createBitmap(big, big, Bitmap.Config.ARGB_8888);
+                  Canvas cv = new Canvas(b);
+                  Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+                  p.setColor(0xFF20A5F5);
+                  cv.drawCircle(32, 32, 32, p);
+                  p.setColor(Color.WHITE); p.setStyle(Paint.Style.STROKE);
+                  p.setStrokeWidth(7); p.setStrokeCap(Paint.Cap.ROUND);
+                  Path path = new Path();
+                  path.moveTo(18, 33); path.lineTo(28, 43); path.lineTo(46, 22);
+                  cv.drawPath(path, p);
+                  icon = new BitmapDrawable(c.getResources(), b);
+                  icon.setBounds(0, 0, px, px);
+
+                  margyt().addSettingsRow("Галочка", "Ник, рядом с которым показать галочку", () ->
+                      margyt().onUiThread(this::askName));
+              }
+
+              private void askName() {
+                  Activity a = margyt().activity();
+                  if (a == null) return;
+                  EditText et = new EditText(a);
+                  et.setText(target);
+                  new AlertDialog.Builder(a).setTitle("Ник для галочки").setView(et)
+                      .setPositiveButton("Ок", (dlg, w) -> {
+                          target = et.getText().toString().trim();
+                          margyt().prefs().edit().putString("name", target).apply();
+                      }).setNegativeButton("Отмена", null).show();
+              }
+
+              @Override public CharSequence onText(CharSequence t) {
+                  String tg = target;
+                  if (t == null || tg.isEmpty() || t.length() > 64 || icon == null) return t;
+                  String s = t.toString().trim();
+                  if (!(s.equalsIgnoreCase(tg) || s.equalsIgnoreCase("@" + tg))) return t;
+                  if (t instanceof Spanned && ((Spanned) t).getSpans(0, t.length(), Tick.class).length > 0) return t;
+                  SpannableStringBuilder sb = new SpannableStringBuilder(t);
+                  sb.append(' ');
+                  int i = sb.length();
+                  sb.append('\uFFFC');
+                  sb.setSpan(new Tick(icon), i, i + 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                  return sb;
+              }
+
+              @Override public void onActivityResumed(Activity a) {
+                  final View root = a.getWindow().getDecorView();
+                  root.getViewTreeObserver().addOnGlobalLayoutListener(() -> {
+                      long now = System.currentTimeMillis();
+                      if (now - lastScan < 300) return;
+                      lastScan = now;
+                      hook(root);
+                  });
+              }
+
+              private void hook(View v) {
+                  if (v instanceof TextView) {
+                      CharSequence t = ((TextView) v).getText();
+                      if (t instanceof Spanned && ((Spanned) t).getSpans(0, t.length(), Tick.class).length > 0)
+                          v.setOnTouchListener(TOUCH);
+                  } else if (v instanceof ViewGroup) {
+                      ViewGroup g = (ViewGroup) v;
+                      for (int i = 0; i < g.getChildCount(); i++) hook(g.getChildAt(i));
+                  }
+              }
+
+              private final View.OnTouchListener TOUCH = new View.OnTouchListener() {
+                  boolean armed;
+                  @Override public boolean onTouch(View v, MotionEvent e) {
+                      int act = e.getActionMasked();
+                      if (act == MotionEvent.ACTION_DOWN) { armed = hit((TextView) v, e); return armed; }
+                      if (!armed) return false;
+                      if (act == MotionEvent.ACTION_UP) {
+                          armed = false;
+                          Toast.makeText(v.getContext(), "Пссс, она визуальная!!", Toast.LENGTH_SHORT).show();
+                      } else if (act == MotionEvent.ACTION_CANCEL) armed = false;
+                      return true;
+                  }
+              };
+
+              private static boolean hit(TextView tv, MotionEvent e) {
+                  Layout l = tv.getLayout();
+                  CharSequence t = tv.getText();
+                  if (l == null || !(t instanceof Spanned)) return false;
+                  Spanned sp = (Spanned) t;
+                  Tick[] ticks = sp.getSpans(0, t.length(), Tick.class);
+                  if (ticks.length == 0) return false;
+                  float x = e.getX() - tv.getTotalPaddingLeft() + tv.getScrollX();
+                  float y = e.getY() - tv.getTotalPaddingTop() + tv.getScrollY();
+                  int line = l.getLineForVertical((int) y);
+                  int s = sp.getSpanStart(ticks[0]);
+                  if (l.getLineForOffset(s) != line) return false;
+                  float slop = 12 * tv.getResources().getDisplayMetrics().density;
+                  return x >= l.getPrimaryHorizontal(s) - slop && x <= l.getPrimaryHorizontal(s + 1) + slop;
+              }
+          }
+          EOF
+          cat > manifest.json <<'EOF'
+          {
+            "id": "margyt.badge",
+            "name": "Badge",
+            "name_ru": "Галочка",
+            "version": "1.0",
+            "author": "you",
+            "description": "A visual checkmark next to a chosen username. Only you can see it.",
+            "description_ru": "Визуальная галочка рядом с выбранным ником. Видна только тебе.",
+            "entry": "cat.you.badge.Badge",
+            "min_api": 4
+          }
+          EOF
+      - name: Compile and dex
+        run: |
+          AJ=$(ls $ANDROID_HOME/platforms/android-*/android.jar | sort -V | tail -1)
+          D8=$(ls $ANDROID_HOME/build-tools/*/d8 | sort -V | tail -1)
+          mkdir classes
+          javac --release 8 -encoding UTF-8 -cp "$AJ" -d classes $(find src -name '*.java')
+          (cd classes && jar cf ../plugin.jar cat/you)
+          "$D8" --min-api 21 --lib "$AJ" --output out plugin.jar
+      - name: Pack mtp
+        run: |
+          cp out/classes.dex .
+          zip margyt.badge.mtp manifest.json classes.dex
+          unzip -l margyt.badge.mtp
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "build-${{ github.run_number }}" margyt.badge.mtp --title "Badge build ${{ github.run_number }}" --notes "margyt.badge.mtp"
