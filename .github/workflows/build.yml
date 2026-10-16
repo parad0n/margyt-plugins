@@ -13,13 +13,9 @@ jobs:
           mkdir -p src/cat/narezany/margyt/plugin src/cat/you/badge out
           cat > src/cat/narezany/margyt/plugin/PluginContext.java <<'EOF'
           package cat.narezany.margyt.plugin;
-          import android.app.Activity;
           import android.content.SharedPreferences;
           public class PluginContext {
               public SharedPreferences prefs() { return null; }
-              public void addSettingsRow(String t, String s, Runnable r) {}
-              public void onUiThread(Runnable r) {}
-              public Activity activity() { return null; }
           }
           EOF
           cat > src/cat/narezany/margyt/plugin/MargyPlugin.java <<'EOF'
@@ -31,6 +27,7 @@ jobs:
               public void onStart(Context c) {}
               public void onActivityResumed(Activity a) {}
               public CharSequence onText(CharSequence t) { return t; }
+              public boolean onOpenSettings(Activity a) { return false; }
           }
           EOF
           cat > src/cat/you/badge/Badge.java <<'EOF'
@@ -72,14 +69,9 @@ jobs:
                   cv.drawPath(path, p);
                   icon = new BitmapDrawable(c.getResources(), b);
                   icon.setBounds(0, 0, px, px);
-
-                  margyt().addSettingsRow("Галочка", "Ник, рядом с которым показать галочку", () ->
-                      margyt().onUiThread(this::askName));
               }
 
-              private void askName() {
-                  Activity a = margyt().activity();
-                  if (a == null) return;
+              @Override public boolean onOpenSettings(Activity a) {
                   EditText et = new EditText(a);
                   et.setText(target);
                   new AlertDialog.Builder(a).setTitle("Ник для галочки").setView(et)
@@ -87,6 +79,7 @@ jobs:
                           target = et.getText().toString().trim();
                           margyt().prefs().edit().putString("name", target).apply();
                       }).setNegativeButton("Отмена", null).show();
+                  return true;
               }
 
               @Override public CharSequence onText(CharSequence t) {
@@ -160,7 +153,7 @@ jobs:
             "id": "margyt.badge",
             "name": "Badge",
             "name_ru": "Галочка",
-            "version": "1.0",
+            "version": "1.1",
             "author": "you",
             "description": "A visual checkmark next to a chosen username. Only you can see it.",
             "description_ru": "Визуальная галочка рядом с выбранным ником. Видна только тебе.",
