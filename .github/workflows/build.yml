@@ -34,117 +34,501 @@ jobs:
           package cat.you.badge;
 
           import android.app.Activity;
-          import android.app.AlertDialog;
+          import android.app.Dialog;
           import android.content.Context;
           import android.graphics.*;
-          import android.graphics.drawable.BitmapDrawable;
+          import android.graphics.drawable.ColorDrawable;
+          import android.graphics.drawable.GradientDrawable;
           import android.text.*;
-          import android.text.style.ImageSpan;
+          import android.text.style.ReplacementSpan;
           import android.view.*;
           import android.widget.*;
+          import java.lang.reflect.InvocationHandler;
+          import java.lang.reflect.InvocationTargetException;
+          import java.lang.reflect.Method;
+          import java.lang.reflect.Proxy;
+          import java.util.ArrayList;
           import cat.narezany.margyt.plugin.MargyPlugin;
 
           public final class Badge extends MargyPlugin {
-              static final class Tick extends ImageSpan {
-                  Tick(BitmapDrawable d) { super(d, ImageSpan.ALIGN_BASELINE); }
+              static final class Entry {
+                  String user, alias; int kind;
+                  Entry(String u, String a, int k) { user = u; alias = a; kind = k; }
               }
 
-              private volatile String target = "";
-              private BitmapDrawable icon;
-              private long lastScan;
+              static final String[] NAMES = {
+                  "Верифицирован", "Золотая", "Зелёная", "Мятная MargyT",
+                  "Розовая TikTok", "Звезда", "Сердце", "Алмаз"
+              };
+              static final int[] COLORS = {
+                  0xFF20A5F5, 0xFFFFC107, 0xFF2ECC71, 0xFF8DD1B0,
+                  0xFFFE2C55, 0xFFFFC107, 0xFFFF4D6D, 0xFF25F4EE
+              };
+              static final int MINT = 0xFF8DD1B0;
+
+              private final ArrayList<Entry> all = new ArrayList<>();
+              private volatile Entry[] entries = new Entry[0];
+              private static final Bitmap[] BMPS = new Bitmap[NAMES.length];
+
+              // ---------- старт и хранение ----------
 
               @Override public void onStart(Context c) {
-                  target = margyt().prefs().getString("name", "").trim();
-                  float d = c.getResources().getDisplayMetrics().density;
-                  int px = (int) (15 * d), big = 64;
-                  Bitmap b = Bitmap.createBitmap(big, big, Bitmap.Config.ARGB_8888);
-                  Canvas cv = new Canvas(b);
-                  Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
-                  p.setColor(0xFF20A5F5);
-                  cv.drawCircle(32, 32, 32, p);
-                  p.setColor(Color.WHITE); p.setStyle(Paint.Style.STROKE);
-                  p.setStrokeWidth(7); p.setStrokeCap(Paint.Cap.ROUND);
-                  Path path = new Path();
-                  path.moveTo(18, 33); path.lineTo(28, 43); path.lineTo(46, 22);
-                  cv.drawPath(path, p);
-                  icon = new BitmapDrawable(c.getResources(), b);
-                  icon.setBounds(0, 0, px, px);
+                  android.content.SharedPreferences sp = margyt().prefs();
+                  String raw = sp.getString("list", "");
+                  for (String line : raw.split("\n")) {
+                      String[] p = line.split("\\|", -1);
+                      if (p.length < 3) continue;
+                      int k = 0;
+                      try { k = Integer.parseInt(p[2]); } catch (Exception ignored) {}
+                      if (k < 0 || k >= NAMES.length) k = 0;
+                      if (!p[0].isEmpty()) all.add(new Entry(p[0], p[1], k));
+                  }
+                  String old = sp.getString("name", "").trim();
+                  if (all.isEmpty() && !old.isEmpty()) all.add(new Entry(clean(old), "", 0));
+                  rebuild();
               }
 
-              @Override public boolean onOpenSettings(Activity a) {
-                  EditText et = new EditText(a);
-                  et.setText(target);
-                  new AlertDialog.Builder(a).setTitle("Ник для галочки").setView(et)
-                      .setPositiveButton("Ок", (dlg, w) -> {
-                          target = et.getText().toString().trim();
-                          margyt().prefs().edit().putString("name", target).apply();
-                      }).setNegativeButton("Отмена", null).show();
-                  return true;
+              private void rebuild() {
+                  Entry[] copy = new Entry[all.size()];
+                  for (int i = 0; i < copy.length; i++) {
+                      Entry e = all.get(i);
+                      copy[i] = new Entry(e.user, e.alias, e.kind);
+                  }
+                  entries = copy;
+              }
+
+              private void persist() {
+                  StringBuilder sb = new StringBuilder();
+                  for (Entry e : all)
+                      sb.append(e.user).append('|').append(e.alias).append('|').append(e.kind).append('\n');
+                  margyt().prefs().edit().putString("list", sb.toString()).apply();
+                  rebuild();
+              }
+
+              private static String clean(String s) {
+                  s = s.replace("|", "").replace("\n", "").replace("\r", "")
+                       .replace("\uFFFC", "").replace("\u200B", "").trim();
+                  if (s.startsWith("@")) s = s.substring(1).trim();
+                  return s;
+              }
+
+              // ---------- значки ----------
+
+              static Bitmap bitmap(int kind) {
+                  Bitmap cached = BMPS[kind];
+                  if (cached != null) return cached;
+                  int S = 96;
+                  Bitmap b = Bitmap.createBitmap(S, S, Bitmap.Config.ARGB_8888);
+                  Canvas c = new Canvas(b);
+                  Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+                  p.setColor(COLORS[kind]);
+                  if (kind <= 4) {
+                      RectF rc = new RectF(S * 0.16f, S * 0.16f, S * 0.84f, S * 0.84f);
+                      c.drawRoundRect(rc, S * 0.16f, S * 0.16f, p);
+                      c.save();
+                      c.rotate(45, S / 2f, S / 2f);
+                      c.drawRoundRect(rc, S * 0.16f, S * 0.16f, p);
+                      c.restore();
+                      p.setColor(Color.WHITE);
+                      p.setStyle(Paint.Style.STROKE);
+                      p.setStrokeWidth(S * 0.085f);
+                      p.setStrokeCap(Paint.Cap.ROUND);
+                      p.setStrokeJoin(Paint.Join.ROUND);
+                      Path ck = new Path();
+                      ck.moveTo(S * 0.31f, S * 0.50f);
+                      ck.lineTo(S * 0.44f, S * 0.63f);
+                      ck.lineTo(S * 0.69f, S * 0.36f);
+                      c.drawPath(ck, p);
+                  } else if (kind == 5) {
+                      Path st = new Path();
+                      for (int i = 0; i < 10; i++) {
+                          double ang = Math.toRadians(-90 + i * 36);
+                          float r = (i % 2 == 0) ? S * 0.47f : S * 0.19f;
+                          float x = (float) (S / 2f + r * Math.cos(ang));
+                          float y = (float) (S * 0.53f + r * Math.sin(ang));
+                          if (i == 0) st.moveTo(x, y); else st.lineTo(x, y);
+                      }
+                      st.close();
+                      c.drawPath(st, p);
+                  } else if (kind == 6) {
+                      Path h = new Path();
+                      h.moveTo(S * 0.5f, S * 0.86f);
+                      h.cubicTo(S * 0.05f, S * 0.55f, S * 0.12f, S * 0.15f, S * 0.5f, S * 0.34f);
+                      h.cubicTo(S * 0.88f, S * 0.15f, S * 0.95f, S * 0.55f, S * 0.5f, S * 0.86f);
+                      h.close();
+                      c.drawPath(h, p);
+                  } else {
+                      Path d = new Path();
+                      d.moveTo(S * 0.5f, S * 0.06f);
+                      d.lineTo(S * 0.9f, S * 0.38f);
+                      d.lineTo(S * 0.5f, S * 0.94f);
+                      d.lineTo(S * 0.1f, S * 0.38f);
+                      d.close();
+                      c.drawPath(d, p);
+                      p.setColor(0xCCFFFFFF);
+                      p.setStyle(Paint.Style.STROKE);
+                      p.setStrokeWidth(S * 0.04f);
+                      c.drawLine(S * 0.1f, S * 0.38f, S * 0.9f, S * 0.38f, p);
+                  }
+                  BMPS[kind] = b;
+                  return b;
+              }
+
+              static final class Tick extends ReplacementSpan {
+                  final Bitmap bmp; final int kind;
+                  private final Rect r = new Rect();
+                  private final Paint bp = new Paint(Paint.FILTER_BITMAP_FLAG);
+                  Tick(Bitmap b, int k) { bmp = b; kind = k; }
+                  private static int size(Paint p) { return Math.max(8, (int) (p.getTextSize() * 0.95f)); }
+                  @Override public int getSize(Paint p, CharSequence t, int s, int e, Paint.FontMetricsInt fm) {
+                      int sz = size(p);
+                      return sz + sz / 4;
+                  }
+                  @Override public void draw(Canvas c, CharSequence t, int s, int e, float x, int top, int y, int bottom, Paint p) {
+                      int sz = size(p);
+                      int l = (int) x + sz / 4;
+                      int tp = y - (int) (sz * 0.86f);
+                      r.set(l, tp, l + sz, tp + sz);
+                      c.drawBitmap(bmp, null, r, bp);
+                  }
+              }
+
+              // ---------- подстановка галочки в текст ----------
+
+              private static int find(String n, Entry[] es) {
+                  for (Entry e : es) {
+                      if (n.equalsIgnoreCase(e.user)) return e.kind;
+                      if (!e.alias.isEmpty() && n.equalsIgnoreCase(e.alias)) return e.kind;
+                  }
+                  return -1;
               }
 
               @Override public CharSequence onText(CharSequence t) {
-                  String tg = target;
-                  if (t == null || tg.isEmpty() || t.length() > 64 || icon == null) return t;
-                  String s = t.toString().trim();
-                  if (!(s.equalsIgnoreCase(tg) || s.equalsIgnoreCase("@" + tg))) return t;
-                  if (t instanceof Spanned && ((Spanned) t).getSpans(0, t.length(), Tick.class).length > 0) return t;
-                  SpannableStringBuilder sb = new SpannableStringBuilder(t);
-                  sb.append(' ');
-                  int i = sb.length();
-                  sb.append('\uFFFC');
-                  sb.setSpan(new Tick(icon), i, i + 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-                  return sb;
+                  try {
+                      Entry[] es = entries;
+                      if (t == null || es.length == 0 || t.length() < 2 || t.length() > 64) return t;
+                      String full = t.toString();
+                      int cut = full.indexOf(" ·");
+                      if (cut < 0) cut = full.indexOf(" •");
+                      String n = (cut > 0 ? full.substring(0, cut) : full).trim();
+                      if (n.startsWith("@")) n = n.substring(1);
+                      int kind = find(n, es);
+                      if (kind < 0) return t;
+                      if (t instanceof Spanned && ((Spanned) t).getSpans(0, t.length(), Tick.class).length > 0) return t;
+                      int pos = cut > 0 ? cut : full.length();
+                      SpannableStringBuilder sb = new SpannableStringBuilder(t);
+                      sb.insert(pos, "\uFFFC");
+                      sb.setSpan(new Tick(bitmap(kind), kind), pos, pos + 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                      return sb;
+                  } catch (Throwable ex) {
+                      return t;
+                  }
               }
+
+              // ---------- нажатие на галочку (не трогает чужие обработчики) ----------
 
               @Override public void onActivityResumed(Activity a) {
-                  final View root = a.getWindow().getDecorView();
-                  root.getViewTreeObserver().addOnGlobalLayoutListener(() -> {
-                      long now = System.currentTimeMillis();
-                      if (now - lastScan < 300) return;
-                      lastScan = now;
-                      hook(root);
-                  });
+                  try {
+                      Window w = a.getWindow();
+                      Window.Callback cb = w.getCallback();
+                      if (cb == null) return;
+                      if (Proxy.isProxyClass(cb.getClass()) && Proxy.getInvocationHandler(cb) instanceof TapHandler) return;
+                      w.setCallback((Window.Callback) Proxy.newProxyInstance(
+                          Badge.class.getClassLoader(), new Class<?>[]{Window.Callback.class},
+                          new TapHandler(w.getDecorView(), cb, this)));
+                  } catch (Throwable ignored) {}
               }
 
-              private void hook(View v) {
-                  if (v instanceof TextView) {
-                      CharSequence t = ((TextView) v).getText();
-                      if (t instanceof Spanned && ((Spanned) t).getSpans(0, t.length(), Tick.class).length > 0)
-                          v.setOnTouchListener(TOUCH);
-                  } else if (v instanceof ViewGroup) {
-                      ViewGroup g = (ViewGroup) v;
-                      for (int i = 0; i < g.getChildCount(); i++) hook(g.getChildAt(i));
-                  }
-              }
-
-              private final View.OnTouchListener TOUCH = new View.OnTouchListener() {
+              static final class TapHandler implements InvocationHandler {
+                  final View decor; final Window.Callback base; final Badge owner;
                   boolean armed;
-                  @Override public boolean onTouch(View v, MotionEvent e) {
-                      int act = e.getActionMasked();
-                      if (act == MotionEvent.ACTION_DOWN) { armed = hit((TextView) v, e); return armed; }
-                      if (!armed) return false;
-                      if (act == MotionEvent.ACTION_UP) {
-                          armed = false;
-                          Toast.makeText(v.getContext(), "Пссс, она визуальная!!", Toast.LENGTH_SHORT).show();
-                      } else if (act == MotionEvent.ACTION_CANCEL) armed = false;
-                      return true;
-                  }
-              };
+                  TapHandler(View d, Window.Callback b, Badge o) { decor = d; base = b; owner = o; }
 
-              private static boolean hit(TextView tv, MotionEvent e) {
+                  @Override public Object invoke(Object proxy, Method m, Object[] args) throws Throwable {
+                      boolean consumed = false;
+                      try {
+                          if ("dispatchTouchEvent".equals(m.getName()) && args != null
+                                  && args.length == 1 && args[0] instanceof MotionEvent) {
+                              MotionEvent e = (MotionEvent) args[0];
+                              int act = e.getActionMasked();
+                              if (act == MotionEvent.ACTION_DOWN) {
+                                  armed = owner.entries.length > 0 && tickAt(decor, e.getRawX(), e.getRawY());
+                                  consumed = armed;
+                              } else if (armed) {
+                                  if (act == MotionEvent.ACTION_UP) {
+                                      armed = false;
+                                      Toast.makeText(decor.getContext(), "Пссс, она визуальная!!", Toast.LENGTH_SHORT).show();
+                                  } else if (act == MotionEvent.ACTION_CANCEL) {
+                                      armed = false;
+                                  }
+                                  consumed = true;
+                              }
+                          }
+                      } catch (Throwable ignored) { armed = false; }
+                      if (consumed) return Boolean.TRUE;
+                      try {
+                          return m.invoke(base, args);
+                      } catch (InvocationTargetException ex) {
+                          throw ex.getCause() != null ? ex.getCause() : ex;
+                      }
+                  }
+              }
+
+              static boolean tickAt(View v, float rx, float ry) {
+                  if (v.getVisibility() != View.VISIBLE) return false;
+                  int[] loc = new int[2];
+                  v.getLocationOnScreen(loc);
+                  if (rx < loc[0] || ry < loc[1] || rx > loc[0] + v.getWidth() || ry > loc[1] + v.getHeight()) return false;
+                  if (v instanceof TextView) return hit((TextView) v, rx - loc[0], ry - loc[1]);
+                  if (v instanceof ViewGroup) {
+                      ViewGroup g = (ViewGroup) v;
+                      for (int i = g.getChildCount() - 1; i >= 0; i--)
+                          if (tickAt(g.getChildAt(i), rx, ry)) return true;
+                  }
+                  return false;
+              }
+
+              static boolean hit(TextView tv, float x, float y) {
                   Layout l = tv.getLayout();
                   CharSequence t = tv.getText();
                   if (l == null || !(t instanceof Spanned)) return false;
                   Spanned sp = (Spanned) t;
                   Tick[] ticks = sp.getSpans(0, t.length(), Tick.class);
                   if (ticks.length == 0) return false;
-                  float x = e.getX() - tv.getTotalPaddingLeft() + tv.getScrollX();
-                  float y = e.getY() - tv.getTotalPaddingTop() + tv.getScrollY();
-                  int line = l.getLineForVertical((int) y);
-                  int s = sp.getSpanStart(ticks[0]);
-                  if (l.getLineForOffset(s) != line) return false;
+                  float px = x - tv.getTotalPaddingLeft() + tv.getScrollX();
+                  float py = y - tv.getTotalPaddingTop() + tv.getScrollY();
                   float slop = 12 * tv.getResources().getDisplayMetrics().density;
-                  return x >= l.getPrimaryHorizontal(s) - slop && x <= l.getPrimaryHorizontal(s + 1) + slop;
+                  for (Tick tk : ticks) {
+                      int s = sp.getSpanStart(tk);
+                      int line = l.getLineForOffset(s);
+                      if (py < l.getLineTop(line) - slop || py > l.getLineBottom(line) + slop) continue;
+                      float x0 = l.getPrimaryHorizontal(s);
+                      float x1 = l.getPrimaryHorizontal(Math.min(s + 1, t.length()));
+                      if (px >= Math.min(x0, x1) - slop && px <= Math.max(x0, x1) + slop) return true;
+                  }
+                  return false;
+              }
+
+              // ---------- меню ----------
+
+              static int dp(Context c, float v) {
+                  return (int) (v * c.getResources().getDisplayMetrics().density + 0.5f);
+              }
+
+              static GradientDrawable bg(int color, int radius) {
+                  GradientDrawable g = new GradientDrawable();
+                  g.setColor(color);
+                  g.setCornerRadius(radius);
+                  return g;
+              }
+
+              static TextView text(Context c, String s, float sp, int color, boolean bold) {
+                  TextView t = new TextView(c);
+                  t.setText(s);
+                  t.setTextSize(sp);
+                  t.setTextColor(color);
+                  if (bold) t.setTypeface(Typeface.DEFAULT_BOLD);
+                  return t;
+              }
+
+              static LinearLayout card(Activity a) {
+                  LinearLayout root = new LinearLayout(a);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  int p = dp(a, 20);
+                  root.setPadding(p, p, p, dp(a, 14));
+                  root.setBackground(bg(0xFF1C1C1E, dp(a, 28)));
+                  return root;
+              }
+
+              static void present(Activity a, Dialog d, View root) {
+                  d.setContentView(root);
+                  d.getWindow().setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+                  d.show();
+                  d.getWindow().setLayout((int) (a.getResources().getDisplayMetrics().widthPixels * 0.92f),
+                      ViewGroup.LayoutParams.WRAP_CONTENT);
+              }
+
+              @Override public boolean onOpenSettings(final Activity a) {
+                  final Dialog d = new Dialog(a);
+                  d.requestWindowFeature(Window.FEATURE_NO_TITLE);
+                  LinearLayout root = card(a);
+                  root.addView(text(a, "Галочки", 24, Color.WHITE, true));
+                  TextView sub = text(a, "Выдай визуальную галочку любому нику. Видишь её только ты.", 13, 0xFF9A9AA0, false);
+                  sub.setPadding(0, dp(a, 4), 0, dp(a, 14));
+                  root.addView(sub);
+
+                  final LinearLayout list = new LinearLayout(a);
+                  list.setOrientation(LinearLayout.VERTICAL);
+                  ScrollView sv = new ScrollView(a);
+                  sv.addView(list);
+                  root.addView(sv, new LinearLayout.LayoutParams(
+                      ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+                  fill(a, list);
+
+                  TextView add = text(a, "+  Выдать галочку", 16, 0xFF10231A, true);
+                  add.setGravity(Gravity.CENTER);
+                  add.setPadding(0, dp(a, 14), 0, dp(a, 14));
+                  add.setBackground(bg(MINT, dp(a, 16)));
+                  add.setOnClickListener(v -> showEdit(a, null, () -> fill(a, list)));
+                  LinearLayout.LayoutParams alp = new LinearLayout.LayoutParams(
+                      ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                  alp.topMargin = dp(a, 10);
+                  root.addView(add, alp);
+
+                  TextView close = text(a, "Закрыть", 15, 0xFF9A9AA0, false);
+                  close.setGravity(Gravity.CENTER);
+                  close.setPadding(0, dp(a, 14), 0, dp(a, 4));
+                  close.setOnClickListener(v -> d.dismiss());
+                  root.addView(close);
+
+                  present(a, d, root);
+                  return true;
+              }
+
+              private void fill(final Activity a, final LinearLayout list) {
+                  list.removeAllViews();
+                  final Runnable re = () -> fill(a, list);
+                  if (all.isEmpty()) {
+                      TextView e = text(a, "Пока никому не выдано", 14, 0xFF6E6E73, false);
+                      e.setGravity(Gravity.CENTER);
+                      e.setPadding(0, dp(a, 18), 0, dp(a, 18));
+                      list.addView(e);
+                      return;
+                  }
+                  for (final Entry en : all) {
+                      LinearLayout row = new LinearLayout(a);
+                      row.setOrientation(LinearLayout.HORIZONTAL);
+                      row.setGravity(Gravity.CENTER_VERTICAL);
+                      row.setPadding(dp(a, 14), dp(a, 10), dp(a, 8), dp(a, 10));
+                      row.setBackground(bg(0xFF2C2C2E, dp(a, 16)));
+
+                      ImageView iv = new ImageView(a);
+                      iv.setImageBitmap(bitmap(en.kind));
+                      row.addView(iv, new LinearLayout.LayoutParams(dp(a, 30), dp(a, 30)));
+
+                      LinearLayout col = new LinearLayout(a);
+                      col.setOrientation(LinearLayout.VERTICAL);
+                      col.setPadding(dp(a, 12), 0, 0, 0);
+                      col.addView(text(a, "@" + en.user + "\u200B", 16, Color.WHITE, true));
+                      String s2 = NAMES[en.kind] + (en.alias.isEmpty() ? "" : " · " + en.alias);
+                      col.addView(text(a, s2, 12, 0xFF9A9AA0, false));
+                      row.addView(col, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+                      TextView x = text(a, "✕", 18, 0xFF9A9AA0, false);
+                      x.setPadding(dp(a, 12), dp(a, 8), dp(a, 12), dp(a, 8));
+                      x.setOnClickListener(v -> { all.remove(en); persist(); re.run(); });
+                      row.addView(x);
+                      row.setOnClickListener(v -> showEdit(a, en, re));
+
+                      LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                      lp.bottomMargin = dp(a, 8);
+                      list.addView(row, lp);
+                  }
+              }
+
+              private static EditText field(Activity a, String hint, String value) {
+                  EditText et = new EditText(a);
+                  et.setSingleLine(true);
+                  et.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+                  et.setTextColor(Color.WHITE);
+                  et.setHintTextColor(0xFF6E6E73);
+                  et.setHint(hint);
+                  et.setTextSize(16);
+                  et.setPadding(dp(a, 14), dp(a, 12), dp(a, 14), dp(a, 12));
+                  et.setBackground(bg(0xFF2C2C2E, dp(a, 14)));
+                  et.setText(value);
+                  return et;
+              }
+
+              private static TextView label(Activity a, String s) {
+                  TextView t = text(a, s, 12, 0xFF9A9AA0, false);
+                  t.setPadding(dp(a, 4), dp(a, 14), 0, dp(a, 6));
+                  return t;
+              }
+
+              private static void mark(Activity a, ImageView[] ivs, int sel) {
+                  for (int i = 0; i < ivs.length; i++) {
+                      GradientDrawable g = bg(0xFF2C2C2E, dp(a, 14));
+                      if (i == sel) g.setStroke(dp(a, 2), MINT);
+                      ivs[i].setBackground(g);
+                  }
+              }
+
+              private void showEdit(final Activity a, final Entry ex, final Runnable done) {
+                  final Dialog d = new Dialog(a);
+                  d.requestWindowFeature(Window.FEATURE_NO_TITLE);
+                  LinearLayout root = card(a);
+                  root.addView(text(a, ex == null ? "Выдать галочку" : "Изменить галочку", 22, Color.WHITE, true));
+
+                  root.addView(label(a, "Юзернейм (без @)"));
+                  final EditText eu = field(a, "mopsssik", ex == null ? "" : ex.user);
+                  root.addView(eu);
+                  root.addView(label(a, "Имя, как он подписан в чате (необязательно)"));
+                  final EditText ea = field(a, "например: Мопс", ex == null ? "" : ex.alias);
+                  root.addView(ea);
+                  root.addView(label(a, "Какую галочку"));
+
+                  final int[] sel = {ex == null ? 0 : ex.kind};
+                  final ImageView[] ivs = new ImageView[NAMES.length];
+                  LinearLayout strip = new LinearLayout(a);
+                  strip.setOrientation(LinearLayout.HORIZONTAL);
+                  for (int k = 0; k < NAMES.length; k++) {
+                      final int kk = k;
+                      ImageView iv = new ImageView(a);
+                      iv.setImageBitmap(bitmap(k));
+                      iv.setPadding(dp(a, 9), dp(a, 9), dp(a, 9), dp(a, 9));
+                      iv.setOnClickListener(v -> { sel[0] = kk; mark(a, ivs, kk); });
+                      ivs[k] = iv;
+                      LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(a, 48), dp(a, 48));
+                      lp.rightMargin = dp(a, 6);
+                      strip.addView(iv, lp);
+                  }
+                  mark(a, ivs, sel[0]);
+                  HorizontalScrollView hs = new HorizontalScrollView(a);
+                  hs.setHorizontalScrollBarEnabled(false);
+                  hs.addView(strip);
+                  root.addView(hs);
+
+                  LinearLayout btns = new LinearLayout(a);
+                  btns.setOrientation(LinearLayout.HORIZONTAL);
+                  btns.setPadding(0, dp(a, 18), 0, 0);
+
+                  TextView cancel = text(a, "Отмена", 15, 0xFFCCCCCC, false);
+                  cancel.setGravity(Gravity.CENTER);
+                  cancel.setPadding(0, dp(a, 13), 0, dp(a, 13));
+                  cancel.setBackground(bg(0xFF2C2C2E, dp(a, 16)));
+                  cancel.setOnClickListener(v -> d.dismiss());
+                  LinearLayout.LayoutParams c1 = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+                  c1.rightMargin = dp(a, 8);
+                  btns.addView(cancel, c1);
+
+                  TextView save = text(a, "Сохранить", 15, 0xFF10231A, true);
+                  save.setGravity(Gravity.CENTER);
+                  save.setPadding(0, dp(a, 13), 0, dp(a, 13));
+                  save.setBackground(bg(MINT, dp(a, 16)));
+                  save.setOnClickListener(v -> {
+                      String u = clean(eu.getText().toString());
+                      String al = clean(ea.getText().toString());
+                      if (u.isEmpty()) {
+                          Toast.makeText(a, "Впиши юзернейм", Toast.LENGTH_SHORT).show();
+                          return;
+                      }
+                      Entry target = ex;
+                      if (target == null) {
+                          for (Entry e : all) if (e.user.equalsIgnoreCase(u)) target = e;
+                          if (target == null) { target = new Entry(u, al, sel[0]); all.add(target); }
+                      }
+                      target.user = u; target.alias = al; target.kind = sel[0];
+                      persist();
+                      d.dismiss();
+                      done.run();
+                  });
+                  btns.addView(save, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+                  root.addView(btns);
+
+                  present(a, d, root);
+                  d.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
               }
           }
           EOF
@@ -153,10 +537,10 @@ jobs:
             "id": "margyt.badge",
             "name": "Badge",
             "name_ru": "Галочка",
-            "version": "1.1",
+            "version": "1.2",
             "author": "you",
-            "description": "A visual checkmark next to a chosen username. Only you can see it.",
-            "description_ru": "Визуальная галочка рядом с выбранным ником. Видна только тебе.",
+            "description": "Give visual checkmarks and badges to any username. Only you can see them.",
+            "description_ru": "Выдавай визуальные галочки и бейджи любым никам. Видишь только ты.",
             "entry": "cat.you.badge.Badge",
             "min_api": 4
           }
