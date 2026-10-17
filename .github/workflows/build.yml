@@ -10,7 +10,7 @@ jobs:
     steps:
       - name: Write sources
         run: |
-          mkdir -p src/cat/narezany/margyt/plugin src/cat/you/badge out
+          mkdir -p src/cat/narezany/margyt/plugin src/cat/you/badge out tools
           cat > src/cat/narezany/margyt/plugin/PluginContext.java <<'EOF'
           package cat.narezany.margyt.plugin;
           import android.content.SharedPreferences;
@@ -39,6 +39,7 @@ jobs:
           import android.content.Context;
           import android.graphics.*;
           import android.graphics.drawable.ColorDrawable;
+          import android.graphics.drawable.Drawable;
           import android.graphics.drawable.GradientDrawable;
           import android.text.*;
           import android.text.style.ReplacementSpan;
@@ -55,29 +56,47 @@ jobs:
 
           public final class Badge extends MargyPlugin {
               static final class Entry {
-                  String user, alias; int kind;
-                  Entry(String u, String a, int k) { user = u; alias = a; kind = k; }
+                  String user, alias; int style, color, place;
+                  Entry(String u, String a, int s, int c, int p) { user = u; alias = a; style = s; color = c; place = p; }
+                  Entry copy() { return new Entry(user, alias, style, color, place); }
               }
 
-              static final String[] NAMES = {
-                  "Верифицирован", "Золотая", "Зелёная", "Мятная MargyT",
-                  "Розовая TikTok", "Звезда", "Сердце", "Алмаз"
+              // style: 0 новая (рифлёная), 1 старая круглая, 2 звезда, 3 сердце, 4 алмаз
+              static final String[] STYLE_NAMES = {"Новая", "Старая круглая", "Звезда", "Сердце", "Алмаз"};
+              static final String[] PLACE_NAMES = {"Везде", "В нике", "В юзернейме"};
+              static final String[] PLACE_LONG = {"везде", "только в нике", "только в юзернейме"};
+              static final int[] PALETTE = {
+                  0xFF20A5F5, 0xFFFFC107, 0xFF2ECC71, 0xFF8DD1B0,
+                  0xFFFE2C55, 0xFFA855F7, 0xFF25F4EE, 0xFFFFFFFF
               };
-              static final int[] COLORS = {
+              static final int[] LEGACY_STYLE = {0, 0, 0, 0, 0, 2, 3, 4};
+              static final int[] LEGACY_COLOR = {
                   0xFF20A5F5, 0xFFFFC107, 0xFF2ECC71, 0xFF8DD1B0,
                   0xFFFE2C55, 0xFFFFC107, 0xFFFF4D6D, 0xFF25F4EE
               };
               static final int MINT = 0xFF8DD1B0;
 
+              static volatile int accent = 0xFFFE2C55;
+              static volatile int gen = 1;
+
               private final ArrayList<Entry> all = new ArrayList<>();
               private volatile Entry[] entries = new Entry[0];
-              private static final Bitmap[] BMPS = new Bitmap[NAMES.length];
               private final WeakHashMap<View, Boolean> attached = new WeakHashMap<>();
               private final HashSet<String> logged = new HashSet<>();
+              private Method accentM;
+              private boolean accentTried;
 
               void note(String s) {
                   try { margyt().log("[badge] " + s); } catch (Throwable ignored) {}
               }
+
+              void once(String s) {
+                  synchronized (logged) {
+                      if (logged.size() < 80 && logged.add(s)) note(s);
+                  }
+              }
+
+              static int resolve(int c) { return c == 0 ? accent : c; }
 
               // ---------- старт и хранение ----------
 
@@ -86,43 +105,52 @@ jobs:
                   String raw = sp.getString("list", "");
                   for (String line : raw.split("\n")) {
                       String[] p = line.split("\\|", -1);
-                      if (p.length < 3) continue;
-                      int k = 0;
-                      try { k = Integer.parseInt(p[2]); } catch (Exception ignored) {}
-                      if (k < 0 || k >= NAMES.length) k = 0;
-                      if (!p[0].isEmpty()) all.add(new Entry(p[0], p[1], k));
+                      if (p.length < 3 || p[0].isEmpty()) continue;
+                      try {
+                          if (p.length >= 5) {
+                              int s = Integer.parseInt(p[2]);
+                              int col = Integer.parseInt(p[3]);
+                              int pl = Integer.parseInt(p[4]);
+                              if (s < 0 || s >= STYLE_NAMES.length) s = 0;
+                              if (pl < 0 || pl >= PLACE_NAMES.length) pl = 0;
+                              all.add(new Entry(p[0], p[1], s, col, pl));
+                          } else {
+                              int k = Integer.parseInt(p[2]);
+                              if (k < 0 || k >= LEGACY_STYLE.length) k = 0;
+                              all.add(new Entry(p[0], p[1], LEGACY_STYLE[k], LEGACY_COLOR[k], 0));
+                          }
+                      } catch (Exception ignored) {}
                   }
                   String old = sp.getString("name", "").trim();
-                  if (all.isEmpty() && !old.isEmpty()) all.add(new Entry(clean(old), "", 0));
+                  if (all.isEmpty() && !old.isEmpty()) all.add(new Entry(clean(old), "", 0, PALETTE[0], 0));
                   rebuild();
-                  note("started, entries=" + all.size());
+                  note("started v1.4, entries=" + all.size());
               }
 
               private void rebuild() {
                   Entry[] copy = new Entry[all.size()];
-                  for (int i = 0; i < copy.length; i++) {
-                      Entry e = all.get(i);
-                      copy[i] = new Entry(e.user, e.alias, e.kind);
-                  }
+                  for (int i = 0; i < copy.length; i++) copy[i] = all.get(i).copy();
                   entries = copy;
+                  gen++;
               }
 
               private void persist() {
                   StringBuilder sb = new StringBuilder();
                   for (Entry e : all)
-                      sb.append(e.user).append('|').append(e.alias).append('|').append(e.kind).append('\n');
+                      sb.append(e.user).append('|').append(e.alias).append('|').append(e.style)
+                        .append('|').append(e.color).append('|').append(e.place).append('\n');
                   margyt().prefs().edit().putString("list", sb.toString()).apply();
                   rebuild();
               }
 
-              private static String clean(String s) {
+              static String clean(String s) {
                   s = s.replace("|", "").replace("\n", "").replace("\r", "")
                        .replace("\uFFFC", "").replace("\u200B", "").trim();
                   if (s.startsWith("@")) s = s.substring(1).trim();
                   return s;
               }
 
-              static String norm(String s) {
+              static String clear(String s) {
                   StringBuilder b = new StringBuilder(s.length());
                   for (int i = 0; i < s.length(); i++) {
                       char c = s.charAt(i);
@@ -131,116 +159,186 @@ jobs:
                               || c == '\u2060' || c == '\uFEFF' || c == '\uFFFC') continue;
                       b.append(c);
                   }
-                  String r = b.toString().trim();
-                  if (r.startsWith("@")) r = r.substring(1).trim();
-                  return r;
+                  return b.toString().trim();
               }
 
-              // ---------- значки ----------
+              // ---------- цвет мода ----------
 
-              static Bitmap bitmap(int kind) {
-                  Bitmap cached = BMPS[kind];
-                  if (cached != null) return cached;
-                  int S = 96;
-                  Bitmap b = Bitmap.createBitmap(S, S, Bitmap.Config.ARGB_8888);
-                  Canvas c = new Canvas(b);
-                  Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
-                  p.setColor(COLORS[kind]);
-                  if (kind <= 4) {
-                      RectF rc = new RectF(S * 0.16f, S * 0.16f, S * 0.84f, S * 0.84f);
-                      c.drawRoundRect(rc, S * 0.16f, S * 0.16f, p);
-                      c.save();
-                      c.rotate(45, S / 2f, S / 2f);
-                      c.drawRoundRect(rc, S * 0.16f, S * 0.16f, p);
-                      c.restore();
-                      p.setColor(Color.WHITE);
-                      p.setStyle(Paint.Style.STROKE);
-                      p.setStrokeWidth(S * 0.085f);
-                      p.setStrokeCap(Paint.Cap.ROUND);
-                      p.setStrokeJoin(Paint.Join.ROUND);
-                      Path ck = new Path();
-                      ck.moveTo(S * 0.31f, S * 0.50f);
-                      ck.lineTo(S * 0.44f, S * 0.63f);
-                      ck.lineTo(S * 0.69f, S * 0.36f);
-                      c.drawPath(ck, p);
-                  } else if (kind == 5) {
-                      Path st = new Path();
+              void refreshAccent() {
+                  try {
+                      Object pc = margyt();
+                      if (accentM == null) {
+                          if (accentTried) return;
+                          accentTried = true;
+                          accentM = pc.getClass().getMethod("accentColour");
+                          accentM.setAccessible(true);
+                      }
+                      Object r = accentM.invoke(pc);
+                      if (r instanceof Number) {
+                          int v = ((Number) r).intValue() | 0xFF000000;
+                          if (v != accent) {
+                              accent = v;
+                              gen++;
+                              note("accent = #" + Integer.toHexString(v & 0xFFFFFF));
+                          }
+                      }
+                  } catch (Throwable t) {
+                      once("accent unavailable: " + t);
+                  }
+              }
+
+              // ---------- рисование значков (векторно, без картинок) ----------
+
+              static void check(Canvas c, int bg, float l, float t, float s, Paint p, Path path) {
+                  int lum = (Color.red(bg) * 299 + Color.green(bg) * 587 + Color.blue(bg) * 114) / 1000;
+                  p.setColor(lum > 205 ? 0xFF222222 : Color.WHITE);
+                  p.setStyle(Paint.Style.STROKE);
+                  p.setStrokeWidth(s * 0.085f);
+                  p.setStrokeCap(Paint.Cap.ROUND);
+                  p.setStrokeJoin(Paint.Join.ROUND);
+                  path.reset();
+                  path.moveTo(l + s * 0.31f, t + s * 0.50f);
+                  path.lineTo(l + s * 0.44f, t + s * 0.63f);
+                  path.lineTo(l + s * 0.69f, t + s * 0.36f);
+                  c.drawPath(path, p);
+              }
+
+              static void paintBadge(Canvas c, int style, int color, float l, float t, float s, Paint p, Path path) {
+                  p.reset();
+                  p.setAntiAlias(true);
+                  p.setStyle(Paint.Style.FILL);
+                  p.setColor(color);
+                  float cx = l + s / 2f, cy = t + s / 2f;
+                  if (style == 1) {
+                      c.drawCircle(cx, cy, s * 0.48f, p);
+                      check(c, color, l, t, s, p, path);
+                  } else if (style == 2) {
+                      path.reset();
                       for (int i = 0; i < 10; i++) {
                           double ang = Math.toRadians(-90 + i * 36);
-                          float r = (i % 2 == 0) ? S * 0.47f : S * 0.19f;
-                          float x = (float) (S / 2f + r * Math.cos(ang));
-                          float y = (float) (S * 0.53f + r * Math.sin(ang));
-                          if (i == 0) st.moveTo(x, y); else st.lineTo(x, y);
+                          float r = (i % 2 == 0) ? s * 0.47f : s * 0.19f;
+                          float x = (float) (cx + r * Math.cos(ang));
+                          float y = (float) (t + s * 0.53f + r * Math.sin(ang));
+                          if (i == 0) path.moveTo(x, y); else path.lineTo(x, y);
                       }
-                      st.close();
-                      c.drawPath(st, p);
-                  } else if (kind == 6) {
-                      Path h = new Path();
-                      h.moveTo(S * 0.5f, S * 0.86f);
-                      h.cubicTo(S * 0.05f, S * 0.55f, S * 0.12f, S * 0.15f, S * 0.5f, S * 0.34f);
-                      h.cubicTo(S * 0.88f, S * 0.15f, S * 0.95f, S * 0.55f, S * 0.5f, S * 0.86f);
-                      h.close();
-                      c.drawPath(h, p);
-                  } else {
-                      Path d = new Path();
-                      d.moveTo(S * 0.5f, S * 0.06f);
-                      d.lineTo(S * 0.9f, S * 0.38f);
-                      d.lineTo(S * 0.5f, S * 0.94f);
-                      d.lineTo(S * 0.1f, S * 0.38f);
-                      d.close();
-                      c.drawPath(d, p);
+                      path.close();
+                      c.drawPath(path, p);
+                  } else if (style == 3) {
+                      path.reset();
+                      path.moveTo(l + s * 0.5f, t + s * 0.86f);
+                      path.cubicTo(l + s * 0.05f, t + s * 0.55f, l + s * 0.12f, t + s * 0.15f, l + s * 0.5f, t + s * 0.34f);
+                      path.cubicTo(l + s * 0.88f, t + s * 0.15f, l + s * 0.95f, t + s * 0.55f, l + s * 0.5f, t + s * 0.86f);
+                      path.close();
+                      c.drawPath(path, p);
+                  } else if (style == 4) {
+                      path.reset();
+                      path.moveTo(l + s * 0.5f, t + s * 0.06f);
+                      path.lineTo(l + s * 0.9f, t + s * 0.38f);
+                      path.lineTo(l + s * 0.5f, t + s * 0.94f);
+                      path.lineTo(l + s * 0.1f, t + s * 0.38f);
+                      path.close();
+                      c.drawPath(path, p);
                       p.setColor(0xCCFFFFFF);
                       p.setStyle(Paint.Style.STROKE);
-                      p.setStrokeWidth(S * 0.04f);
-                      c.drawLine(S * 0.1f, S * 0.38f, S * 0.9f, S * 0.38f, p);
+                      p.setStrokeWidth(s * 0.04f);
+                      c.drawLine(l + s * 0.1f, t + s * 0.38f, l + s * 0.9f, t + s * 0.38f, p);
+                  } else {
+                      RectF rc = new RectF(l + s * 0.16f, t + s * 0.16f, l + s * 0.84f, t + s * 0.84f);
+                      c.drawRoundRect(rc, s * 0.16f, s * 0.16f, p);
+                      c.save();
+                      c.rotate(45, cx, cy);
+                      c.drawRoundRect(rc, s * 0.16f, s * 0.16f, p);
+                      c.restore();
+                      check(c, color, l, t, s, p, path);
                   }
-                  BMPS[kind] = b;
-                  return b;
+              }
+
+              static final class BadgeDrawable extends Drawable {
+                  int style, color;
+                  private final Paint p = new Paint();
+                  private final Path path = new Path();
+                  BadgeDrawable(int s, int c) { style = s; color = c; }
+                  void set(int s, int c) { style = s; color = c; invalidateSelf(); }
+                  @Override public void draw(Canvas c) {
+                      Rect b = getBounds();
+                      float s = Math.min(b.width(), b.height());
+                      paintBadge(c, style, resolve(color), b.left + (b.width() - s) / 2f,
+                          b.top + (b.height() - s) / 2f, s, p, path);
+                  }
+                  @Override public void setAlpha(int a) {}
+                  @Override public void setColorFilter(ColorFilter f) {}
+                  @Override public int getOpacity() { return PixelFormat.TRANSLUCENT; }
               }
 
               static final class Tick extends ReplacementSpan {
-                  final Bitmap bmp; final int kind;
-                  private final Rect r = new Rect();
-                  private final Paint bp = new Paint(Paint.FILTER_BITMAP_FLAG);
-                  Tick(Bitmap b, int k) { bmp = b; kind = k; }
-                  private static int size(Paint p) { return Math.max(8, (int) (p.getTextSize() * 0.95f)); }
+                  final int style, color, gen;
+                  private final Paint bp = new Paint();
+                  private final Path bpath = new Path();
+                  Tick(int s, int c, int g) { style = s; color = c; gen = g; }
+                  private static int size(Paint tp) { return Math.max(8, (int) (tp.getTextSize() * 0.95f)); }
                   @Override public int getSize(Paint p, CharSequence t, int s, int e, Paint.FontMetricsInt fm) {
                       int sz = size(p);
                       return sz + sz / 4;
                   }
                   @Override public void draw(Canvas c, CharSequence t, int s, int e, float x, int top, int y, int bottom, Paint p) {
                       int sz = size(p);
-                      int l = (int) x + sz / 4;
-                      int tp = y - (int) (sz * 0.86f);
-                      r.set(l, tp, l + sz, tp + sz);
-                      c.drawBitmap(bmp, null, r, bp);
+                      paintBadge(c, style, resolve(color), x + sz / 4f, y - sz * 0.86f, sz, bp, bpath);
                   }
               }
 
               // ---------- подстановка галочки в текст ----------
 
-              private static int find(String n, Entry[] es) {
+              static Entry find(String n, boolean at, Entry[] es) {
                   for (Entry e : es) {
-                      if (n.equalsIgnoreCase(e.user)) return e.kind;
-                      if (!e.alias.isEmpty() && n.equalsIgnoreCase(e.alias)) return e.kind;
+                      boolean mu = n.equalsIgnoreCase(e.user);
+                      boolean ma = !e.alias.isEmpty() && n.equalsIgnoreCase(e.alias);
+                      boolean ok = at ? mu : (mu || ma);
+                      if (!ok) continue;
+                      if (e.place == 1 && at) continue;   // только в нике
+                      if (e.place == 2 && !at) continue;  // только в юзернейме
+                      return e;
                   }
-                  return -1;
+                  return null;
               }
 
+              static SpannableStringBuilder strip(Spanned t) {
+                  SpannableStringBuilder sb = new SpannableStringBuilder(t);
+                  Tick[] tk = sb.getSpans(0, sb.length(), Tick.class);
+                  for (Tick k : tk) {
+                      int s = sb.getSpanStart(k), e = sb.getSpanEnd(k);
+                      if (s >= 0 && e > s) sb.delete(s, e);
+                  }
+                  return sb;
+              }
+
+              // null = текст менять не нужно
               CharSequence decorate(CharSequence t) {
+                  if (t == null) return null;
+                  int len = t.length();
+                  if (len < 2 || len > 70) return null;
+                  boolean has = false, stale = false;
+                  if (t instanceof Spanned) {
+                      Tick[] tk = ((Spanned) t).getSpans(0, len, Tick.class);
+                      has = tk.length > 0;
+                      for (Tick k : tk) if (k.gen != gen) stale = true;
+                  }
                   Entry[] es = entries;
-                  if (t == null || es.length == 0 || t.length() < 2 || t.length() > 64) return null;
-                  if (t instanceof Spanned && ((Spanned) t).getSpans(0, t.length(), Tick.class).length > 0) return null;
-                  String full = t.toString();
+                  if (has && !stale && es.length > 0) return null;
+                  CharSequence base = has ? strip((Spanned) t) : t;
+                  if (es.length == 0) return has ? base : null;
+                  String full = base.toString();
+                  if (full.length() > 64) return has ? base : null;
                   int cut = full.indexOf(" ·");
                   if (cut < 0) cut = full.indexOf(" •");
-                  String n = norm(cut > 0 ? full.substring(0, cut) : full);
-                  int kind = find(n, es);
-                  if (kind < 0) return null;
+                  String head = clear(cut > 0 ? full.substring(0, cut) : full);
+                  boolean at = head.startsWith("@");
+                  String n = at ? head.substring(1).trim() : head;
+                  Entry m = find(n, at, es);
+                  if (m == null) return has ? base : null;
                   int pos = cut > 0 ? cut : full.length();
-                  SpannableStringBuilder sb = new SpannableStringBuilder(t);
+                  SpannableStringBuilder sb = new SpannableStringBuilder(base);
                   sb.insert(pos, "\uFFFC");
-                  sb.setSpan(new Tick(bitmap(kind), kind), pos, pos + 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                  sb.setSpan(new Tick(m.style, m.color, gen), pos, pos + 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
                   return sb;
               }
 
@@ -253,7 +351,7 @@ jobs:
                   }
               }
 
-              // ---------- обход экрана: работает, даже если onText не вызывается ----------
+              // ---------- обход экрана (работает, даже если onText не вызывается) ----------
 
               final class Scanner implements ViewTreeObserver.OnGlobalLayoutListener, Runnable {
                   final View decor; final String name;
@@ -271,7 +369,8 @@ jobs:
                   @Override public void run() {
                       pending = false;
                       try {
-                          if (entries.length == 0) return;
+                          refreshAccent();
+                          if (entries.length == 0 && !anyTicks) return;
                           int[] st = new int[2];
                           walk(decor, st);
                           long now = System.currentTimeMillis();
@@ -290,16 +389,15 @@ jobs:
                           st[0]++;
                           TextView tv = (TextView) v;
                           CharSequence t = tv.getText();
-                          if (t == null || t.length() < 2 || t.length() > 64) return;
-                          if (t instanceof Spanned && ((Spanned) t).getSpans(0, t.length(), Tick.class).length > 0) {
-                              st[1]++;
-                              return;
-                          }
+                          if (t == null || t.length() < 2 || t.length() > 70) return;
                           CharSequence nt = decorate(t);
                           if (nt != null) {
+                              once("set: " + t);
                               tv.setText(nt);
+                              anyTicks = true;
                               st[1]++;
-                              note("tick set on: " + t);
+                          } else if (t instanceof Spanned && ((Spanned) t).getSpans(0, t.length(), Tick.class).length > 0) {
+                              st[1]++;
                           } else {
                               near(t);
                           }
@@ -312,14 +410,13 @@ jobs:
                   }
               }
 
+              private volatile boolean anyTicks;
+
               void near(CharSequence t) {
-                  Entry[] es = entries;
                   String s = t.toString().toLowerCase();
-                  for (Entry e : es) {
+                  for (Entry e : entries) {
                       if (s.contains(e.user.toLowerCase())) {
-                          synchronized (logged) {
-                              if (logged.size() < 80 && logged.add(s)) note("similar text, no match: " + t);
-                          }
+                          once("similar text, no match: " + t);
                           return;
                       }
                   }
@@ -329,6 +426,7 @@ jobs:
 
               @Override public void onActivityResumed(Activity a) {
                   try {
+                      refreshAccent();
                       Window w = a.getWindow();
                       View decor = w.getDecorView();
                       boolean fresh;
@@ -365,7 +463,7 @@ jobs:
                               MotionEvent e = (MotionEvent) args[0];
                               int act = e.getActionMasked();
                               if (act == MotionEvent.ACTION_DOWN) {
-                                  armed = owner.entries.length > 0 && tickAt(decor, e.getRawX(), e.getRawY());
+                                  armed = owner.anyTicks && tickAt(decor, e.getRawX(), e.getRawY());
                                   consumed = armed;
                               } else if (armed) {
                                   if (act == MotionEvent.ACTION_UP) {
@@ -453,8 +551,8 @@ jobs:
                   return root;
               }
 
-              static void present(Activity a, Dialog d, View root) {
-                  d.setContentView(root);
+              static void present(Activity a, Dialog d, View content) {
+                  d.setContentView(content);
                   d.getWindow().setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
                   d.show();
                   d.getWindow().setLayout((int) (a.getResources().getDisplayMetrics().widthPixels * 0.92f),
@@ -516,14 +614,16 @@ jobs:
                       row.setBackground(bg(0xFF2C2C2E, dp(a, 16)));
 
                       ImageView iv = new ImageView(a);
-                      iv.setImageBitmap(bitmap(en.kind));
+                      iv.setImageDrawable(new BadgeDrawable(en.style, en.color));
                       row.addView(iv, new LinearLayout.LayoutParams(dp(a, 30), dp(a, 30)));
 
                       LinearLayout col = new LinearLayout(a);
                       col.setOrientation(LinearLayout.VERTICAL);
                       col.setPadding(dp(a, 12), 0, 0, 0);
                       col.addView(text(a, "@" + en.user + "\u2009", 16, Color.WHITE, true));
-                      String s2 = NAMES[en.kind] + (en.alias.isEmpty() ? "" : " · " + en.alias);
+                      String s2 = STYLE_NAMES[en.style] + " · " + (en.color == 0 ? "цвет мода" : "свой цвет")
+                          + " · " + PLACE_LONG[en.place];
+                      if (!en.alias.isEmpty()) s2 += " · ник: " + en.alias;
                       col.addView(text(a, s2, 12, 0xFF9A9AA0, false));
                       row.addView(col, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
@@ -560,11 +660,13 @@ jobs:
                   return t;
               }
 
-              private static void mark(Activity a, ImageView[] ivs, int sel) {
-                  for (int i = 0; i < ivs.length; i++) {
-                      GradientDrawable g = bg(0xFF2C2C2E, dp(a, 14));
-                      if (i == sel) g.setStroke(dp(a, 2), MINT);
-                      ivs[i].setBackground(g);
+              static int parseHex(String s, int fallback) {
+                  s = s.trim();
+                  if (s.isEmpty()) return fallback;
+                  try {
+                      return Color.parseColor(s.startsWith("#") ? s : "#" + s) | 0xFF000000;
+                  } catch (Exception e) {
+                      return fallback;
                   }
               }
 
@@ -572,36 +674,133 @@ jobs:
                   final Dialog d = new Dialog(a);
                   d.requestWindowFeature(Window.FEATURE_NO_TITLE);
                   LinearLayout root = card(a);
-                  root.addView(text(a, ex == null ? "Выдать галочку" : "Изменить галочку", 22, Color.WHITE, true));
+
+                  final int[] st = {ex == null ? 0 : ex.style};
+                  final int[] col = {ex == null ? PALETTE[0] : ex.color};
+                  final int[] pl = {ex == null ? 0 : ex.place};
+
+                  LinearLayout head = new LinearLayout(a);
+                  head.setOrientation(LinearLayout.HORIZONTAL);
+                  head.setGravity(Gravity.CENTER_VERTICAL);
+                  head.addView(text(a, ex == null ? "Выдать галочку" : "Изменить галочку", 22, Color.WHITE, true),
+                      new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+                  final BadgeDrawable prev = new BadgeDrawable(st[0], col[0]);
+                  ImageView pv = new ImageView(a);
+                  pv.setImageDrawable(prev);
+                  head.addView(pv, new LinearLayout.LayoutParams(dp(a, 40), dp(a, 40)));
+                  root.addView(head);
 
                   root.addView(label(a, "Юзернейм (без @)"));
                   final EditText eu = field(a, "mopsssik", ex == null ? "" : ex.user);
                   root.addView(eu);
-                  root.addView(label(a, "Имя, как он подписан в чате (необязательно)"));
+
+                  root.addView(label(a, "Ник, как он подписан в профиле и чате (необязательно)"));
                   final EditText ea = field(a, "например: Мопс", ex == null ? "" : ex.alias);
                   root.addView(ea);
-                  root.addView(label(a, "Какую галочку"));
 
-                  final int[] sel = {ex == null ? 0 : ex.kind};
-                  final ImageView[] ivs = new ImageView[NAMES.length];
+                  root.addView(label(a, "Где показывать галочку"));
+                  final TextView[] seg = new TextView[PLACE_NAMES.length];
+                  LinearLayout segRow = new LinearLayout(a);
+                  segRow.setOrientation(LinearLayout.HORIZONTAL);
+                  final Runnable[] upd = new Runnable[1];
+                  for (int i = 0; i < seg.length; i++) {
+                      final int ii = i;
+                      TextView sg = text(a, PLACE_NAMES[i], 13, 0xFFCCCCCC, true);
+                      sg.setGravity(Gravity.CENTER);
+                      sg.setPadding(0, dp(a, 11), 0, dp(a, 11));
+                      sg.setOnClickListener(v -> { pl[0] = ii; upd[0].run(); });
+                      seg[i] = sg;
+                      LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+                      if (i < seg.length - 1) lp.rightMargin = dp(a, 6);
+                      segRow.addView(sg, lp);
+                  }
+                  root.addView(segRow);
+
+                  final TextView styleLbl = label(a, "Вид");
+                  root.addView(styleLbl);
+                  final BadgeDrawable[] bds = new BadgeDrawable[STYLE_NAMES.length];
+                  final ImageView[] ivs = new ImageView[STYLE_NAMES.length];
                   LinearLayout strip = new LinearLayout(a);
                   strip.setOrientation(LinearLayout.HORIZONTAL);
-                  for (int k = 0; k < NAMES.length; k++) {
+                  for (int k = 0; k < STYLE_NAMES.length; k++) {
                       final int kk = k;
                       ImageView iv = new ImageView(a);
-                      iv.setImageBitmap(bitmap(k));
+                      bds[k] = new BadgeDrawable(k, col[0]);
+                      iv.setImageDrawable(bds[k]);
                       iv.setPadding(dp(a, 9), dp(a, 9), dp(a, 9), dp(a, 9));
-                      iv.setOnClickListener(v -> { sel[0] = kk; mark(a, ivs, kk); });
+                      iv.setOnClickListener(v -> { st[0] = kk; upd[0].run(); });
                       ivs[k] = iv;
-                      LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(a, 48), dp(a, 48));
+                      LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(a, 50), dp(a, 50));
                       lp.rightMargin = dp(a, 6);
                       strip.addView(iv, lp);
                   }
-                  mark(a, ivs, sel[0]);
                   HorizontalScrollView hs = new HorizontalScrollView(a);
                   hs.setHorizontalScrollBarEnabled(false);
                   hs.addView(strip);
                   root.addView(hs);
+
+                  root.addView(label(a, "Цвет  (М: подстраивается под цвет мода)"));
+                  String hex0 = "";
+                  if (ex != null && ex.color != 0) {
+                      boolean inPal = false;
+                      for (int pc : PALETTE) if (pc == ex.color) inPal = true;
+                      if (!inPal) hex0 = String.format("#%06X", ex.color & 0xFFFFFF);
+                  }
+                  final EditText eh = field(a, "#RRGGBB", hex0);
+                  final TextView[] chips = new TextView[PALETTE.length + 1];
+                  LinearLayout strip2 = new LinearLayout(a);
+                  strip2.setOrientation(LinearLayout.HORIZONTAL);
+                  for (int i = 0; i <= PALETTE.length; i++) {
+                      final int val = i == 0 ? 0 : PALETTE[i - 1];
+                      TextView ch = text(a, i == 0 ? "М" : "", 14, Color.WHITE, true);
+                      ch.setGravity(Gravity.CENTER);
+                      ch.setOnClickListener(v -> { col[0] = val; eh.setText(""); upd[0].run(); });
+                      chips[i] = ch;
+                      LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(a, 38), dp(a, 38));
+                      lp.rightMargin = dp(a, 8);
+                      strip2.addView(ch, lp);
+                  }
+                  HorizontalScrollView hs2 = new HorizontalScrollView(a);
+                  hs2.setHorizontalScrollBarEnabled(false);
+                  hs2.addView(strip2);
+                  root.addView(hs2);
+
+                  root.addView(label(a, "Свой цвет HEX (необязательно)"));
+                  root.addView(eh);
+
+                  upd[0] = () -> {
+                      String hx = eh.getText().toString();
+                      boolean custom = !hx.trim().isEmpty();
+                      int cc = custom ? parseHex(hx, col[0]) : col[0];
+                      prev.set(st[0], cc);
+                      styleLbl.setText("Вид: " + STYLE_NAMES[st[0]]);
+                      for (int i = 0; i < bds.length; i++) {
+                          bds[i].set(i, cc);
+                          GradientDrawable g = bg(0xFF2C2C2E, dp(a, 14));
+                          if (i == st[0]) g.setStroke(dp(a, 2), MINT);
+                          ivs[i].setBackground(g);
+                      }
+                      for (int i = 0; i < seg.length; i++) {
+                          boolean on = i == pl[0];
+                          seg[i].setBackground(bg(on ? MINT : 0xFF2C2C2E, dp(a, 12)));
+                          seg[i].setTextColor(on ? 0xFF10231A : 0xFFCCCCCC);
+                      }
+                      for (int i = 0; i < chips.length; i++) {
+                          int base = i == 0 ? accent : PALETTE[i - 1];
+                          boolean on = !custom && (i == 0 ? col[0] == 0 : col[0] == PALETTE[i - 1]);
+                          GradientDrawable g = new GradientDrawable();
+                          g.setShape(GradientDrawable.OVAL);
+                          g.setColor(base);
+                          g.setStroke(dp(a, on ? 3 : 1), on ? Color.WHITE : 0x33FFFFFF);
+                          chips[i].setBackground(g);
+                      }
+                  };
+                  eh.addTextChangedListener(new TextWatcher() {
+                      @Override public void beforeTextChanged(CharSequence s, int i1, int i2, int i3) {}
+                      @Override public void onTextChanged(CharSequence s, int i1, int i2, int i3) { upd[0].run(); }
+                      @Override public void afterTextChanged(Editable s) {}
+                  });
+                  upd[0].run();
 
                   LinearLayout btns = new LinearLayout(a);
                   btns.setOrientation(LinearLayout.HORIZONTAL);
@@ -627,12 +826,22 @@ jobs:
                           Toast.makeText(a, "Впиши юзернейм", Toast.LENGTH_SHORT).show();
                           return;
                       }
+                      int fc = col[0];
+                      String hx = eh.getText().toString().trim();
+                      if (!hx.isEmpty()) {
+                          int parsed = parseHex(hx, 0);
+                          if (parsed == 0) {
+                              Toast.makeText(a, "Неверный цвет, пример: #FF2C55", Toast.LENGTH_SHORT).show();
+                              return;
+                          }
+                          fc = parsed;
+                      }
                       Entry target = ex;
                       if (target == null) {
                           for (Entry e : all) if (e.user.equalsIgnoreCase(u)) target = e;
-                          if (target == null) { target = new Entry(u, al, sel[0]); all.add(target); }
+                          if (target == null) { target = new Entry(u, al, st[0], fc, pl[0]); all.add(target); }
                       }
-                      target.user = u; target.alias = al; target.kind = sel[0];
+                      target.user = u; target.alias = al; target.style = st[0]; target.color = fc; target.place = pl[0];
                       persist();
                       d.dismiss();
                       done.run();
@@ -640,8 +849,49 @@ jobs:
                   btns.addView(save, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
                   root.addView(btns);
 
-                  present(a, d, root);
+                  ScrollView scroll = new ScrollView(a);
+                  scroll.addView(root);
+                  present(a, d, scroll);
                   d.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
+              }
+          }
+          EOF
+          cat > tools/Icon.java <<'EOF'
+          import java.awt.*;
+          import java.awt.geom.*;
+          import java.awt.image.BufferedImage;
+          import java.io.File;
+          import javax.imageio.ImageIO;
+
+          public class Icon {
+              public static void main(String[] args) throws Exception {
+                  int S = 512;
+                  BufferedImage im = new BufferedImage(S, S, BufferedImage.TYPE_INT_ARGB);
+                  Graphics2D g = im.createGraphics();
+                  g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+                  g.setRenderingHint(RenderingHints.KEY_STROKE_CONTROL, RenderingHints.VALUE_STROKE_PURE);
+                  g.setColor(new Color(0x1C1C1E));
+                  g.fill(new RoundRectangle2D.Double(0, 0, S, S, S * 0.24, S * 0.24));
+                  g.setColor(new Color(0xE0245E));
+                  RoundRectangle2D sq = new RoundRectangle2D.Double(S * 0.2, S * 0.2, S * 0.6, S * 0.6, S * 0.16, S * 0.16);
+                  g.fill(sq);
+                  g.rotate(Math.toRadians(45), S / 2.0, S / 2.0);
+                  g.fill(sq);
+                  g.setTransform(new AffineTransform());
+                  g.setColor(Color.WHITE);
+                  g.setStroke(new BasicStroke((float) (S * 0.075), BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
+                  Path2D.Double p = new Path2D.Double();
+                  p.moveTo(S * 0.35, S * 0.51);
+                  p.lineTo(S * 0.46, S * 0.62);
+                  p.lineTo(S * 0.66, S * 0.39);
+                  g.draw(p);
+                  g.dispose();
+                  BufferedImage out = new BufferedImage(128, 128, BufferedImage.TYPE_INT_ARGB);
+                  Graphics2D g2 = out.createGraphics();
+                  g2.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BICUBIC);
+                  g2.drawImage(im, 0, 0, 128, 128, null);
+                  g2.dispose();
+                  ImageIO.write(out, "png", new File(args[0]));
               }
           }
           EOF
@@ -650,7 +900,7 @@ jobs:
             "id": "margyt.badge",
             "name": "Badge",
             "name_ru": "Галочка",
-            "version": "1.3",
+            "version": "1.4",
             "author": "you",
             "description": "Give visual checkmarks and badges to any username. Only you can see them.",
             "description_ru": "Выдавай визуальные галочки и бейджи любым никам. Видишь только ты.",
@@ -658,6 +908,9 @@ jobs:
             "min_api": 4
           }
           EOF
+      - name: Make icon
+        continue-on-error: true
+        run: java -Djava.awt.headless=true tools/Icon.java icon.png
       - name: Compile and dex
         run: |
           AJ=$(ls $ANDROID_HOME/platforms/android-*/android.jar | sort -V | tail -1)
@@ -669,7 +922,9 @@ jobs:
       - name: Pack mtp
         run: |
           cp out/classes.dex .
-          zip margyt.badge.mtp manifest.json classes.dex
+          FILES="manifest.json classes.dex"
+          if [ -f icon.png ]; then FILES="$FILES icon.png"; fi
+          zip margyt.badge.mtp $FILES
           unzip -l margyt.badge.mtp
       - name: Release
         env:
