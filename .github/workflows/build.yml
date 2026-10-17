@@ -16,6 +16,7 @@ jobs:
           import android.content.SharedPreferences;
           public class PluginContext {
               public SharedPreferences prefs() { return null; }
+              public void log(String s) {}
           }
           EOF
           cat > src/cat/narezany/margyt/plugin/MargyPlugin.java <<'EOF'
@@ -48,6 +49,8 @@ jobs:
           import java.lang.reflect.Method;
           import java.lang.reflect.Proxy;
           import java.util.ArrayList;
+          import java.util.HashSet;
+          import java.util.WeakHashMap;
           import cat.narezany.margyt.plugin.MargyPlugin;
 
           public final class Badge extends MargyPlugin {
@@ -69,6 +72,12 @@ jobs:
               private final ArrayList<Entry> all = new ArrayList<>();
               private volatile Entry[] entries = new Entry[0];
               private static final Bitmap[] BMPS = new Bitmap[NAMES.length];
+              private final WeakHashMap<View, Boolean> attached = new WeakHashMap<>();
+              private final HashSet<String> logged = new HashSet<>();
+
+              void note(String s) {
+                  try { margyt().log("[badge] " + s); } catch (Throwable ignored) {}
+              }
 
               // ---------- старт и хранение ----------
 
@@ -86,6 +95,7 @@ jobs:
                   String old = sp.getString("name", "").trim();
                   if (all.isEmpty() && !old.isEmpty()) all.add(new Entry(clean(old), "", 0));
                   rebuild();
+                  note("started, entries=" + all.size());
               }
 
               private void rebuild() {
@@ -110,6 +120,20 @@ jobs:
                        .replace("\uFFFC", "").replace("\u200B", "").trim();
                   if (s.startsWith("@")) s = s.substring(1).trim();
                   return s;
+              }
+
+              static String norm(String s) {
+                  StringBuilder b = new StringBuilder(s.length());
+                  for (int i = 0; i < s.length(); i++) {
+                      char c = s.charAt(i);
+                      if (c == '\u00A0') c = ' ';
+                      if ((c >= '\u200B' && c <= '\u200F') || (c >= '\u202A' && c <= '\u202E')
+                              || c == '\u2060' || c == '\uFEFF' || c == '\uFFFC') continue;
+                      b.append(c);
+                  }
+                  String r = b.toString().trim();
+                  if (r.startsWith("@")) r = r.substring(1).trim();
+                  return r;
               }
 
               // ---------- значки ----------
@@ -203,40 +227,129 @@ jobs:
                   return -1;
               }
 
+              CharSequence decorate(CharSequence t) {
+                  Entry[] es = entries;
+                  if (t == null || es.length == 0 || t.length() < 2 || t.length() > 64) return null;
+                  if (t instanceof Spanned && ((Spanned) t).getSpans(0, t.length(), Tick.class).length > 0) return null;
+                  String full = t.toString();
+                  int cut = full.indexOf(" ·");
+                  if (cut < 0) cut = full.indexOf(" •");
+                  String n = norm(cut > 0 ? full.substring(0, cut) : full);
+                  int kind = find(n, es);
+                  if (kind < 0) return null;
+                  int pos = cut > 0 ? cut : full.length();
+                  SpannableStringBuilder sb = new SpannableStringBuilder(t);
+                  sb.insert(pos, "\uFFFC");
+                  sb.setSpan(new Tick(bitmap(kind), kind), pos, pos + 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                  return sb;
+              }
+
               @Override public CharSequence onText(CharSequence t) {
                   try {
-                      Entry[] es = entries;
-                      if (t == null || es.length == 0 || t.length() < 2 || t.length() > 64) return t;
-                      String full = t.toString();
-                      int cut = full.indexOf(" ·");
-                      if (cut < 0) cut = full.indexOf(" •");
-                      String n = (cut > 0 ? full.substring(0, cut) : full).trim();
-                      if (n.startsWith("@")) n = n.substring(1);
-                      int kind = find(n, es);
-                      if (kind < 0) return t;
-                      if (t instanceof Spanned && ((Spanned) t).getSpans(0, t.length(), Tick.class).length > 0) return t;
-                      int pos = cut > 0 ? cut : full.length();
-                      SpannableStringBuilder sb = new SpannableStringBuilder(t);
-                      sb.insert(pos, "\uFFFC");
-                      sb.setSpan(new Tick(bitmap(kind), kind), pos, pos + 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-                      return sb;
+                      CharSequence r = decorate(t);
+                      return r != null ? r : t;
                   } catch (Throwable ex) {
                       return t;
                   }
               }
 
-              // ---------- нажатие на галочку (не трогает чужие обработчики) ----------
+              // ---------- обход экрана: работает, даже если onText не вызывается ----------
+
+              final class Scanner implements ViewTreeObserver.OnGlobalLayoutListener, Runnable {
+                  final View decor; final String name;
+                  boolean pending; long lastReport;
+                  Scanner(Activity a, View d) { decor = d; name = a.getClass().getSimpleName(); }
+
+                  @Override public void onGlobalLayout() { kick(); }
+
+                  void kick() {
+                      if (pending) return;
+                      pending = true;
+                      decor.postDelayed(this, 250);
+                  }
+
+                  @Override public void run() {
+                      pending = false;
+                      try {
+                          if (entries.length == 0) return;
+                          int[] st = new int[2];
+                          walk(decor, st);
+                          long now = System.currentTimeMillis();
+                          if (now - lastReport > 20000) {
+                              lastReport = now;
+                              note("scan " + name + ": TextViews=" + st[0] + ", with tick=" + st[1]);
+                          }
+                      } catch (Throwable t) {
+                          note("scan error: " + t);
+                      }
+                  }
+
+                  void walk(View v, int[] st) {
+                      if (v instanceof TextView) {
+                          if (v instanceof EditText) return;
+                          st[0]++;
+                          TextView tv = (TextView) v;
+                          CharSequence t = tv.getText();
+                          if (t == null || t.length() < 2 || t.length() > 64) return;
+                          if (t instanceof Spanned && ((Spanned) t).getSpans(0, t.length(), Tick.class).length > 0) {
+                              st[1]++;
+                              return;
+                          }
+                          CharSequence nt = decorate(t);
+                          if (nt != null) {
+                              tv.setText(nt);
+                              st[1]++;
+                              note("tick set on: " + t);
+                          } else {
+                              near(t);
+                          }
+                          return;
+                      }
+                      if (v instanceof ViewGroup) {
+                          ViewGroup g = (ViewGroup) v;
+                          for (int i = 0; i < g.getChildCount(); i++) walk(g.getChildAt(i), st);
+                      }
+                  }
+              }
+
+              void near(CharSequence t) {
+                  Entry[] es = entries;
+                  String s = t.toString().toLowerCase();
+                  for (Entry e : es) {
+                      if (s.contains(e.user.toLowerCase())) {
+                          synchronized (logged) {
+                              if (logged.size() < 80 && logged.add(s)) note("similar text, no match: " + t);
+                          }
+                          return;
+                      }
+                  }
+              }
+
+              // ---------- активности: обход и нажатие ----------
 
               @Override public void onActivityResumed(Activity a) {
                   try {
                       Window w = a.getWindow();
+                      View decor = w.getDecorView();
+                      boolean fresh;
+                      synchronized (attached) {
+                          fresh = !attached.containsKey(decor);
+                          if (fresh) attached.put(decor, Boolean.TRUE);
+                      }
+                      if (fresh) {
+                          Scanner sc = new Scanner(a, decor);
+                          decor.getViewTreeObserver().addOnGlobalLayoutListener(sc);
+                          sc.kick();
+                      }
                       Window.Callback cb = w.getCallback();
                       if (cb == null) return;
                       if (Proxy.isProxyClass(cb.getClass()) && Proxy.getInvocationHandler(cb) instanceof TapHandler) return;
                       w.setCallback((Window.Callback) Proxy.newProxyInstance(
                           Badge.class.getClassLoader(), new Class<?>[]{Window.Callback.class},
-                          new TapHandler(w.getDecorView(), cb, this)));
-                  } catch (Throwable ignored) {}
+                          new TapHandler(decor, cb, this)));
+                  } catch (Throwable t) {
+                      note("resume error: " + t);
+                  }
               }
 
               static final class TapHandler implements InvocationHandler {
@@ -409,7 +522,7 @@ jobs:
                       LinearLayout col = new LinearLayout(a);
                       col.setOrientation(LinearLayout.VERTICAL);
                       col.setPadding(dp(a, 12), 0, 0, 0);
-                      col.addView(text(a, "@" + en.user + "\u200B", 16, Color.WHITE, true));
+                      col.addView(text(a, "@" + en.user + "\u2009", 16, Color.WHITE, true));
                       String s2 = NAMES[en.kind] + (en.alias.isEmpty() ? "" : " · " + en.alias);
                       col.addView(text(a, s2, 12, 0xFF9A9AA0, false));
                       row.addView(col, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
@@ -537,7 +650,7 @@ jobs:
             "id": "margyt.badge",
             "name": "Badge",
             "name_ru": "Галочка",
-            "version": "1.2",
+            "version": "1.3",
             "author": "you",
             "description": "Give visual checkmarks and badges to any username. Only you can see them.",
             "description_ru": "Выдавай визуальные галочки и бейджи любым никам. Видишь только ты.",
